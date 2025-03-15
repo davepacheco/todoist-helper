@@ -3,25 +3,27 @@
 use anyhow::{Context, anyhow};
 use chrono::SecondsFormat;
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use http::HeaderMap;
 use http::HeaderValue;
 use octocrab::{Octocrab, models::issues::Issue, models::pulls::PullRequest};
 use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // XXX-dap TODO:
 // - command-line argument for "since" date
 // - do something similar for RFD URLs that I do for GitHub ones
 // - get personal access token for Oxide organization
 // - ask about some kind of access token for RFD site?
+// - move the GitHub fetching to fetch-time instead of print-time so that we can
+//   report all that stuff at once
 
 static TODOIST_API_TOKEN: &str = include_str!("../todoist_token.txt");
 static GITHUB_API_TOKEN: &str = include_str!("../github_token.txt");
-static API_URL: &str = "https://api.todoist.com/sync/v9";
-// static API_URL: &str = "http://127.0.0.1:8080/sync/v9";
+// debug with: mitmproxy --mode reverse:https://api.todoist.com
+// static TODOIST_API_URL: &str = "http://127.0.0.1:8080/sync/v9";
+static TODOIST_API_URL: &str = "https://api.todoist.com/sync/v9";
 
 #[tokio::main]
 async fn main() {
@@ -32,6 +34,7 @@ async fn main() {
 }
 
 async fn doit() -> Result<(), anyhow::Error> {
+    // Set up client for talking to Todoist
     let mut headers = HeaderMap::new();
     headers.insert(
         http::header::AUTHORIZATION,
@@ -44,21 +47,24 @@ async fn doit() -> Result<(), anyhow::Error> {
         .build()
         .context("failed to build reqwest client")?;
 
+    // Set up client for talking to GitHub
     let octocrab = Octocrab::builder()
         .personal_token(GITHUB_API_TOKEN.trim())
         .build()
         .context("Failed to create Octocrab instance")?;
+
+    // Fetch Todoist items
 
     // XXX-dap command-line arg, and figure out if it should be a day or what,
     // and if it's inclusive or what, and interpreted in what TZ
     // let since: chrono::DateTime<chrono::Utc> =
     //     "2025-03-13T00:00:00Z".parse().unwrap();
     let since: chrono::DateTime<chrono::Utc> =
-        "2025-02-07T00:00:00-08:00".parse().unwrap();
+        "2025-02-26T00:00:00-08:00".parse().unwrap();
 
-    let mut all_items = fetch_completed_tasks(&client, since).await?;
+    let all_items = fetch_completed_tasks(&client, since).await?;
 
-    // Print a report.
+    // Print a report.  Along the way, fetch GItHub links.
     let (reconfigurator_project, reconfigurator_items) = all_items
         .iter()
         .find(|(k, _)| k.starts_with("Oxide: Reconfigurator"))
@@ -66,7 +72,7 @@ async fn doit() -> Result<(), anyhow::Error> {
     let other_project_items = all_items
         .iter()
         .filter_map(|(k, v)| {
-            if k.starts_with("Oxide:") && k != reconfigurator_project {
+            if k.starts_with("Oxide") && k != reconfigurator_project {
                 Some(v)
             } else {
                 None
@@ -74,33 +80,38 @@ async fn doit() -> Result<(), anyhow::Error> {
         })
         .flatten();
 
+    // Store which tasks we've printed to avoid printing the same one multiple
+    // times.  (This comes up for routines.)
     let mut printed = BTreeSet::new();
 
+    println!("RECONFIGURATOR ITEMS:");
     for item in reconfigurator_items {
-        if !printed.insert(item.id) {
+        if !printed.insert(&item.task_id) {
             continue;
         }
         println!("* {}", item.content);
         for link in item.fetch_github_titles(&octocrab).await? {
-            println!("    * [{}]({}) {}", link.label, link.link, link.title);
+            println!("    * [{}]({}) ({:?})", link.label, link.url, link.title);
         }
     }
 
-    println!();
+    println!("\n\nOther work:");
 
     for item in other_project_items {
-        if !printed.insert(item.id) {
+        if !printed.insert(&item.task_id) {
             continue;
         }
         println!("* {}", item.content);
         for link in item.fetch_github_titles(&octocrab).await? {
-            println!("    * [{}]({}) {}", link.label, link.link, link.title);
+            println!("    * [{}]({}) ({:?})", link.label, link.url, link.title);
         }
     }
 
     Ok(())
 }
 
+/// From Todoist, fetch all items completed since "since", grouped by each
+/// task's project's name.
 async fn fetch_completed_tasks(
     client: &Client,
     since: DateTime<Utc>,
@@ -112,9 +123,10 @@ async fn fetch_completed_tasks(
 
     loop {
         eprintln!("note: making Todoist request (offset = {offset})");
+
         let url = format!(
             "{}/completed/get_all?limit={}&offset={}&since={}",
-            API_URL,
+            TODOIST_API_URL,
             limit,
             offset,
             since.to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -156,29 +168,32 @@ async fn fetch_completed_tasks(
     Ok(rv)
 }
 
+/// Describes the response to the "get all completed items" API
+#[derive(Debug, Deserialize)]
+struct CompletedItems {
+    /// list of items completed
+    items: Vec<Item>,
+    /// metadata about projects associated with the items completed
+    projects: BTreeMap<String, Project>,
+}
+
+/// Describes one completed item
+///
+/// There can be many of these for one task if it's a recurring task that was
+/// completed multiple times.
 #[derive(Debug, Deserialize)]
 struct Item {
     content: String,
     task_id: String,
     project_id: String,
-    completed_at: DateTime<Utc>,
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct CompletedItems {
-    projects: BTreeMap<String, Project>,
-    items: Vec<Item>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Project {
-    parent_id: Option<String>,
-    id: String,
     name: String,
 }
 
-/// Struct to represent a parsed GitHub issue or pull request link
+/// Describes a parsed link to a GitHub issue or pull request
 #[derive(Debug)]
 struct GitHubLink {
     owner: String,
@@ -193,15 +208,19 @@ enum GitHubKind {
     PullRequest,
 }
 
+/// Summarizes the information about a completed GitHub item
 #[derive(Debug)]
 struct GitHubWorkItem {
-    link: String,
+    /// link to the GitHub page for this item
+    url: String,
+    /// title of the item
     title: String,
+    /// human-readable summary of the item (generally: `owner/repo#123`)
     label: String,
 }
 
 impl Item {
-    /// Extract GitHub issue and pull request links as structured data
+    /// Extract GitHub issue and pull request links
     fn extract_github_links(&self) -> Vec<GitHubLink> {
         let github_regex = Regex::new(
             r"https?://github\.com/(?P<owner>[\w-]+)/(?P<repo>[\w-]+)/(issues|pull)/(?P<number>\d+)"
@@ -225,7 +244,7 @@ impl Item {
             .collect()
     }
 
-    /// Fetch the titles of GitHub issues or PRs using Octocrab
+    /// Fetch the titles of GitHub issues or PRs mentioned in this item
     async fn fetch_github_titles(
         &self,
         octocrab: &Octocrab,
@@ -250,7 +269,7 @@ impl Item {
                     };
                     rv.push(GitHubWorkItem {
                         label,
-                        link: issue.html_url.to_string(),
+                        url: issue.html_url.to_string(),
                         title: issue.title,
                     });
                 }
@@ -270,11 +289,14 @@ impl Item {
                     let title = pr.title.ok_or_else(|| {
                         anyhow!("Missing title for {}", label)
                     })?;
-                    rv.push(GitHubWorkItem {
-                        label,
-                        link: pr.html_url.to_string(),
-                        title,
-                    });
+                    let url = match pr.html_url {
+                        Some(u) => u.to_string(),
+                        None => {
+                            eprintln!("warn: no HTML url for {}", label);
+                            continue;
+                        }
+                    };
+                    rv.push(GitHubWorkItem { label, url, title });
                 }
             }
         }
