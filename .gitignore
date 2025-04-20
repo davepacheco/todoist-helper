@@ -1,4 +1,5 @@
 /target
 /todoist_token.txt
 /github_token*.txt
+/rfd_site_token.txt
 /sample_*.json

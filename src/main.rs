@@ -12,18 +12,17 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 // XXX-dap TODO:
-// - command-line argument for "since" date
-// - do something similar for RFD URLs that I do for GitHub ones
 // - get personal access token for Oxide organization
-// - ask about some kind of access token for RFD site?
 // - move the GitHub fetching to fetch-time instead of print-time so that we can
 //   report all that stuff at once
 
 static TODOIST_API_TOKEN: &str = include_str!("../todoist_token.txt");
 static GITHUB_API_TOKEN: &str = include_str!("../github_token.txt");
+static RFD_API_TOKEN: &str = include_str!("../rfd_site_token.txt");
 // debug with: mitmproxy --mode reverse:https://api.todoist.com
 // static TODOIST_API_URL: &str = "http://127.0.0.1:8080/sync/v9";
 static TODOIST_API_URL: &str = "https://api.todoist.com/sync/v9";
+static RFD_API_URL: &str = "https://rfd-api.shared.oxide.computer";
 
 #[tokio::main]
 async fn main() {
@@ -36,8 +35,7 @@ async fn main() {
 async fn doit() -> Result<(), anyhow::Error> {
     // Parse the "since" argument.
     let since_arg = std::env::args()
-        .skip(1)
-        .next()
+        .nth(1)
         .ok_or_else(|| anyhow!("expected TIMESTAMP argument"))?;
     let since: DateTime<Utc> = DateTime::parse_from_rfc3339(&since_arg)
         .context("expected RFC 3339 timestamp")?
@@ -62,10 +60,26 @@ async fn doit() -> Result<(), anyhow::Error> {
         .build()
         .context("Failed to create Octocrab instance")?;
 
+    // Set up client for talking to RFD API
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", RFD_API_TOKEN.trim()))
+            .context("constructing header")?,
+    );
+
+    let rfd_reqwest_client = reqwest::ClientBuilder::new()
+        .default_headers(headers)
+        .build()
+        .context("failed to build reqwest client")?;
+
+    let rfd_client =
+        rfd_sdk::Client::new_with_client(RFD_API_URL, rfd_reqwest_client);
+
     // Fetch Todoist items
     let all_items = fetch_completed_tasks(&client, since).await?;
 
-    // Print a report.  Along the way, fetch GItHub links.
+    // Print a report.  Along the way, fetch GItHub links and RFD links.
     let (reconfigurator_project, reconfigurator_items) = all_items
         .iter()
         .find(|(k, _)| k.starts_with("Oxide: Reconfigurator"))
@@ -94,6 +108,10 @@ async fn doit() -> Result<(), anyhow::Error> {
         for link in item.fetch_github_titles(&octocrab).await? {
             println!("    * [{}]({}) ({:?})", link.label, link.url, link.title);
         }
+
+        for link in item.fetch_rfd_titles(&rfd_client).await? {
+            println!("    * [{}]({}) ({:?})", link.label, link.url, link.title);
+        }
     }
 
     println!("\n\nOther work:");
@@ -104,6 +122,9 @@ async fn doit() -> Result<(), anyhow::Error> {
         }
         println!("* {}", item.content);
         for link in item.fetch_github_titles(&octocrab).await? {
+            println!("    * [{}]({}) ({:?})", link.label, link.url, link.title);
+        }
+        for link in item.fetch_rfd_titles(&rfd_client).await? {
             println!("    * [{}]({}) ({:?})", link.label, link.url, link.title);
         }
     }
@@ -220,6 +241,20 @@ struct GitHubWorkItem {
     label: String,
 }
 
+/// Describes a parsed reference to an RFD
+#[derive(Debug)]
+struct RfdReference {
+    number: u64,
+}
+
+/// Summarizes information about a referenced RFD item
+#[derive(Debug)]
+struct RfdWorkItem {
+    url: String,
+    title: String,
+    label: String,
+}
+
 impl Item {
     /// Extract GitHub issue and pull request links
     fn extract_github_links(&self) -> Vec<GitHubLink> {
@@ -300,6 +335,68 @@ impl Item {
                     rv.push(GitHubWorkItem { label, url, title });
                 }
             }
+        }
+
+        Ok(rv)
+    }
+
+    /// Extract references to RFD numbers
+    fn extract_rfd_references(&self) -> Vec<RfdReference> {
+        let rfd_regex = Regex::new(r"RFD *(?P<number>\d+)").unwrap();
+
+        rfd_regex
+            .captures_iter(&self.content)
+            .filter_map(|caps| {
+                let number: u64 = caps.name("number")?.as_str().parse().ok()?;
+                Some(RfdReference { number })
+            })
+            .collect()
+    }
+
+    /// Fetch the titles of GitHub issues or PRs mentioned in this item
+    async fn fetch_rfd_titles(
+        &self,
+        rfd_client: &rfd_sdk::Client,
+    ) -> anyhow::Result<Vec<RfdWorkItem>> {
+        let mut rv = Vec::new();
+        for rfdref in self.extract_rfd_references() {
+            let rfd_metadata = rfd_client
+                .view_rfd_meta()
+                .number(rfdref.number.to_string())
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to fetch information about RFD {}",
+                        rfdref.number
+                    )
+                });
+            let rfd_metadata = match rfd_metadata {
+                Err(error) => {
+                    eprintln!("warn: {:#}", error);
+                    continue;
+                }
+                Ok(metadata) => metadata.into_inner(),
+            };
+
+            let Ok(num) = u64::try_from(rfd_metadata.rfd_number) else {
+                eprintln!(
+                    "warn: RFD {}: reported RFD number was not a u64",
+                    rfd_metadata.rfd_number
+                );
+                continue;
+            };
+
+            let Some(title) = rfd_metadata.title else {
+                eprintln!("warn: RFD {}: missing title", num);
+                continue;
+            };
+
+            rv.push(RfdWorkItem {
+                url: format!("https://rfd.shared.oxide.computer/rfd/{}", num),
+                title: title.clone(),
+                label: format!("RFD {}", num),
+            });
         }
 
         Ok(rv)
