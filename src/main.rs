@@ -34,6 +34,15 @@ async fn main() {
 }
 
 async fn doit() -> Result<(), anyhow::Error> {
+    // Parse the "since" argument.
+    let since_arg = std::env::args()
+        .skip(1)
+        .next()
+        .ok_or_else(|| anyhow!("expected TIMESTAMP argument"))?;
+    let since: DateTime<Utc> = DateTime::parse_from_rfc3339(&since_arg)
+        .context("expected RFC 3339 timestamp")?
+        .to_utc();
+
     // Set up client for talking to Todoist
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -54,14 +63,6 @@ async fn doit() -> Result<(), anyhow::Error> {
         .context("Failed to create Octocrab instance")?;
 
     // Fetch Todoist items
-
-    // XXX-dap command-line arg, and figure out if it should be a day or what,
-    // and if it's inclusive or what, and interpreted in what TZ
-    // let since: chrono::DateTime<chrono::Utc> =
-    //     "2025-03-13T00:00:00Z".parse().unwrap();
-    let since: chrono::DateTime<chrono::Utc> =
-        "2025-02-26T00:00:00-08:00".parse().unwrap();
-
     let all_items = fetch_completed_tasks(&client, since).await?;
 
     // Print a report.  Along the way, fetch GItHub links.
