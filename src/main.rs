@@ -20,8 +20,8 @@ static TODOIST_API_TOKEN: &str = include_str!("../todoist_token.txt");
 static GITHUB_API_TOKEN: &str = include_str!("../github_token.txt");
 static RFD_API_TOKEN: &str = include_str!("../rfd_site_token.txt");
 // debug with: mitmproxy --mode reverse:https://api.todoist.com
-// static TODOIST_API_URL: &str = "http://127.0.0.1:8080/sync/v9";
-static TODOIST_API_URL: &str = "https://api.todoist.com/sync/v9";
+// static TODOIST_API_URL: &str = "http://127.0.0.1:8080/api/v1";
+static TODOIST_API_URL: &str = "https://api.todoist.com/api/v1";
 static RFD_API_URL: &str = "https://rfd-api.shared.oxide.computer";
 
 #[tokio::main]
@@ -101,7 +101,7 @@ async fn doit() -> Result<(), anyhow::Error> {
 
     println!("RECONFIGURATOR ITEMS:");
     for item in reconfigurator_items {
-        if !printed.insert(&item.task_id) {
+        if !printed.insert(&item.id) {
             continue;
         }
         println!("* {}", item.content);
@@ -117,7 +117,7 @@ async fn doit() -> Result<(), anyhow::Error> {
     println!("\n\nOther work:");
 
     for item in other_project_items {
-        if !printed.insert(&item.task_id) {
+        if !printed.insert(&item.id) {
             continue;
         }
         println!("* {}", item.content);
@@ -132,71 +132,115 @@ async fn doit() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// From Todoist, fetch all items completed since "since", grouped by each
-/// task's project's name.
-async fn fetch_completed_tasks(
+/// Fetch all Todoist projects, returning a map from project ID to project.
+async fn fetch_projects(
     client: &Client,
-    since: DateTime<Utc>,
-) -> anyhow::Result<BTreeMap<String, Vec<Item>>> {
-    let mut offset = 0;
-    let limit = 200;
-
+) -> anyhow::Result<BTreeMap<String, Project>> {
     let mut rv = BTreeMap::new();
+    let mut cursor: Option<String> = None;
 
     loop {
-        eprintln!("note: making Todoist request (offset = {offset})");
+        eprintln!("note: making Todoist projects request");
 
-        let url = format!(
-            "{}/completed/get_all?limit={}&offset={}&since={}",
-            TODOIST_API_URL,
-            limit,
-            offset,
-            since.to_rfc3339_opts(SecondsFormat::Secs, true),
-        );
+        let mut request = client
+            .get(format!("{}/projects", TODOIST_API_URL))
+            .query(&[("limit", "10")]);
+        if let Some(ref c) = cursor {
+            request = request.query(&[("cursor", c.as_str())]);
+        }
 
-        let response = client
-            .get(&url)
+        let response = request
             .send()
             .await
-            .context("Failed to send request to Todoist API")?;
+            .context("Failed to send request to Todoist projects API")?;
 
-        let completed_response: CompletedItems = response
-            .json()
-            .await
-            .context("Failed to parse JSON response from Todoist API:\n{}\n")?;
+        let page: ProjectsPage = response.json().await.context(
+            "Failed to parse JSON response from Todoist projects API",
+        )?;
 
-        let nitems = completed_response.items.len();
-        for item in completed_response.items {
-            let Some(project) =
-                completed_response.projects.get(&item.project_id)
-            else {
-                eprintln!(
-                    "warning: item missing associated project in response"
-                );
-                continue;
-            };
-
-            let items = rv.entry(project.name.clone()).or_insert_with(Vec::new);
-            items.push(item);
+        let next = page.next_cursor;
+        for project in page.results {
+            rv.insert(project.id.clone(), project);
         }
 
-        if nitems < limit {
-            break;
+        match next {
+            None => break,
+            Some(c) => cursor = Some(c),
         }
-
-        offset += limit;
     }
 
     Ok(rv)
 }
 
-/// Describes the response to the "get all completed items" API
+/// From Todoist, fetch all items completed since `since`, grouped by each
+/// task's project's name.
+async fn fetch_completed_tasks(
+    client: &Client,
+    since: DateTime<Utc>,
+) -> anyhow::Result<BTreeMap<String, Vec<Item>>> {
+    let projects = fetch_projects(client).await?;
+    let since_str = since.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let until_str = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut rv = BTreeMap::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        eprintln!("note: making Todoist request");
+
+        let mut request = client
+            .get(format!(
+                "{}/tasks/completed/by_completion_date",
+                TODOIST_API_URL,
+            ))
+            .query(&[
+                ("limit", "200"),
+                ("since", &since_str),
+                ("until", &until_str),
+            ]);
+
+        if let Some(ref c) = cursor {
+            request = request.query(&[("cursor", c.as_str())]);
+        }
+
+        let response = request
+            .send()
+            .await
+            .context("Failed to send request to Todoist API")?;
+
+        let page: CompletedTasksPage = response
+            .json()
+            .await
+            .context("Failed to parse JSON response from Todoist API")?;
+
+        let next = page.next_cursor;
+        for item in page.items {
+            let Some(project) = projects.get(&item.project_id) else {
+                eprintln!(
+                    "warning: item {:?} missing associated project",
+                    item.id,
+                );
+                continue;
+            };
+
+            rv.entry(project.name.clone()).or_insert_with(Vec::new).push(item);
+        }
+
+        match next {
+            None => break,
+            Some(c) => cursor = Some(c),
+        }
+    }
+
+    Ok(rv)
+}
+
+/// Describes the response to the "get completed tasks" API
 #[derive(Debug, Deserialize)]
-struct CompletedItems {
-    /// list of items completed
+struct CompletedTasksPage {
+    /// list of completed tasks
     items: Vec<Item>,
-    /// metadata about projects associated with the items completed
-    projects: BTreeMap<String, Project>,
+    /// cursor for the next page, or `None` if there are no more pages
+    next_cursor: Option<String>,
 }
 
 /// Describes one completed item
@@ -206,12 +250,22 @@ struct CompletedItems {
 #[derive(Debug, Deserialize)]
 struct Item {
     content: String,
-    task_id: String,
+    id: String,
     project_id: String,
+}
+
+/// Describes the response to the "get projects" API
+#[derive(Debug, Deserialize)]
+struct ProjectsPage {
+    /// list of projects
+    results: Vec<Project>,
+    /// cursor for the next page, or `None` if there are no more pages
+    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Project {
+    id: String,
     name: String,
 }
 
