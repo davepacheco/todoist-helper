@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 // - move the GitHub fetching to fetch-time instead of print-time so that
 //   we can report all that stuff at once
 
-static TODOIST_API_TOKEN: &str = include_str!("../todoist_token.txt");
-static GITHUB_API_TOKEN: &str = include_str!("../github_token.txt");
-static RFD_API_TOKEN: &str = include_str!("../rfd_site_token.txt");
+static TODOIST_API_TOKEN: &str = include_str!("../../todoist_token.txt");
+static GITHUB_API_TOKEN: &str = include_str!("../../github_token.txt");
+static RFD_API_TOKEN: &str = include_str!("../../rfd_site_token.txt");
 // debug with: mitmproxy --mode reverse:https://api.todoist.com
 // static TODOIST_API_URL: &str = "http://127.0.0.1:8080/api/v1";
 static TODOIST_API_URL: &str = "https://api.todoist.com/api/v1";
