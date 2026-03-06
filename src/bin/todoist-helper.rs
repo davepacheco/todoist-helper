@@ -7,6 +7,7 @@ use http::HeaderMap;
 use http::HeaderValue;
 use octocrab::Octocrab;
 use reqwest::Client;
+
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,28 +54,11 @@ async fn doit() -> Result<(), anyhow::Error> {
         .context("failed to build reqwest client")?;
 
     // Set up client for talking to GitHub
-    let octocrab = Octocrab::builder()
-        .personal_token(GITHUB_API_TOKEN.trim())
-        .build()
-        .context("Failed to create Octocrab instance")?;
+    let octocrab =
+        todoist_helper::build_github_client(GITHUB_API_TOKEN.trim())?;
 
     // Set up client for talking to RFD API
-    let mut rfd_headers = HeaderMap::new();
-    rfd_headers.insert(
-        http::header::AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", RFD_API_TOKEN.trim()))
-            .context("constructing header")?,
-    );
-
-    let rfd_reqwest_client = reqwest::ClientBuilder::new()
-        .default_headers(rfd_headers)
-        .build()
-        .context("failed to build reqwest client")?;
-
-    let rfd_client = rfd_sdk::Client::new_with_client(
-        todoist_helper::RFD_API_URL,
-        rfd_reqwest_client,
-    );
+    let rfd_client = todoist_helper::build_rfd_client(RFD_API_TOKEN.trim())?;
 
     // Fetch Todoist items
     let all_items = fetch_completed_tasks(&client, since).await?;
@@ -131,7 +115,7 @@ async fn print_item_links(
     for link in todoist_helper::extract_github_links(&item.content) {
         match todoist_helper::fetch_github_work_item(octocrab, &link).await {
             Ok(w) => {
-                println!("    * [{}]({}) ({:?})", w.label, w.url, w.title,)
+                println!("    * {}", w)
             }
             Err(e) => eprintln!("warn: {:#}", e),
         }
@@ -139,7 +123,7 @@ async fn print_item_links(
     for rfd_ref in todoist_helper::extract_rfd_references(&item.content) {
         match todoist_helper::fetch_rfd_work_item(rfd_client, &rfd_ref).await {
             Ok(w) => {
-                println!("    * [{}]({}) ({:?})", w.label, w.url, w.title,)
+                println!("    * {}", w)
             }
             Err(e) => eprintln!("warn: {:#}", e),
         }

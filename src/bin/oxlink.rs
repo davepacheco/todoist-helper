@@ -7,11 +7,6 @@
 //! - Short GitHub refs:   `repo#123` or `owner/repo#123`
 //! - RFD references:      `RFD 123` or `RFD123`
 
-use anyhow::Context;
-use http::HeaderMap;
-use http::HeaderValue;
-use octocrab::Octocrab;
-
 static GITHUB_API_TOKEN: &str = include_str!("../../github_token.txt");
 static RFD_API_TOKEN: &str = include_str!("../../rfd_site_token.txt");
 
@@ -36,33 +31,18 @@ async fn doit() -> anyhow::Result<()> {
     }
 
     // Set up client for talking to GitHub.
-    let octocrab = Octocrab::builder()
-        .personal_token(GITHUB_API_TOKEN.trim())
-        .build()
-        .context("failed to create Octocrab instance")?;
+    let octocrab =
+        todoist_helper::build_github_client(GITHUB_API_TOKEN.trim())?;
 
     // Set up client for talking to the RFD API.
-    let mut rfd_headers = HeaderMap::new();
-    rfd_headers.insert(
-        http::header::AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", RFD_API_TOKEN.trim()))
-            .context("constructing RFD auth header")?,
-    );
-    let rfd_reqwest_client = reqwest::ClientBuilder::new()
-        .default_headers(rfd_headers)
-        .build()
-        .context("failed to build reqwest client")?;
-    let rfd_client = rfd_sdk::Client::new_with_client(
-        todoist_helper::RFD_API_URL,
-        rfd_reqwest_client,
-    );
+    let rfd_client = todoist_helper::build_rfd_client(RFD_API_TOKEN.trim())?;
 
     for arg in &args {
         // Full GitHub URLs (e.g., https://github.com/owner/repo/issues/1)
         for link in todoist_helper::extract_github_links(arg) {
             match todoist_helper::fetch_github_work_item(&octocrab, &link).await
             {
-                Ok(w) => println!("[{}]({})", w.title, w.url),
+                Ok(w) => println!("{}", w),
                 Err(e) => eprintln!("warn: {:#}", e),
             }
         }
@@ -73,7 +53,7 @@ async fn doit() -> anyhow::Result<()> {
         for link in todoist_helper::extract_short_github_refs(arg) {
             match todoist_helper::fetch_github_work_item(&octocrab, &link).await
             {
-                Ok(w) => println!("[{}]({})", w.title, w.url),
+                Ok(w) => println!("{}", w),
                 Err(e) => eprintln!("warn: {:#}", e),
             }
         }
@@ -83,7 +63,7 @@ async fn doit() -> anyhow::Result<()> {
             match todoist_helper::fetch_rfd_work_item(&rfd_client, &rfd_ref)
                 .await
             {
-                Ok(w) => println!("[{}]({})", w.title, w.url),
+                Ok(w) => println!("{}", w),
                 Err(e) => eprintln!("warn: {:#}", e),
             }
         }

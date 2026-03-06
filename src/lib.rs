@@ -1,8 +1,10 @@
 //! Shared library for resolving GitHub and RFD references to Markdown links.
 
 use anyhow::{Context, anyhow};
+use http::HeaderValue;
 use octocrab::{Octocrab, models::issues::Issue, models::pulls::PullRequest};
 use regex::Regex;
+use std::fmt;
 
 /// URL for the RFD API
 pub const RFD_API_URL: &str = "https://rfd-api.shared.oxide.computer";
@@ -40,6 +42,12 @@ pub struct GitHubWorkItem {
     pub label: String,
 }
 
+impl fmt::Display for GitHubWorkItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}]({}) ({:?})", self.label, self.url, self.title)
+    }
+}
+
 /// Describes a parsed reference to an RFD
 #[derive(Debug)]
 pub struct RfdReference {
@@ -52,6 +60,12 @@ pub struct RfdWorkItem {
     pub url: String,
     pub title: String,
     pub label: String,
+}
+
+impl fmt::Display for RfdWorkItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}]({}) ({:?})", self.label, self.url, self.title)
+    }
 }
 
 /// Extract full GitHub issue/PR URLs from text
@@ -153,6 +167,27 @@ pub async fn fetch_github_work_item(
             Ok(GitHubWorkItem { label, url, title })
         }
     }
+}
+
+/// Build an Octocrab client authenticated with the given personal token.
+pub fn build_github_client(token: &str) -> anyhow::Result<Octocrab> {
+    Octocrab::builder()
+        .personal_token(token)
+        .build()
+        .context("failed to create Octocrab instance")
+}
+
+/// Build an RFD API client authenticated with the given bearer token.
+pub fn build_rfd_client(token: &str) -> anyhow::Result<rfd_sdk::Client> {
+    let auth_header = HeaderValue::from_str(&format!("Bearer {}", token))
+        .context("constructing RFD auth header")?;
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::AUTHORIZATION, auth_header);
+    let reqwest_client = reqwest::ClientBuilder::new()
+        .default_headers(headers)
+        .build()
+        .context("failed to build reqwest client")?;
+    Ok(rfd_sdk::Client::new_with_client(RFD_API_URL, reqwest_client))
 }
 
 /// Fetch details for an RFD reference
