@@ -769,7 +769,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.0",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
