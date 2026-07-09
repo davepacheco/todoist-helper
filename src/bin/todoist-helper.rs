@@ -67,7 +67,12 @@ async fn doit() -> Result<(), anyhow::Error> {
     let (reconfigurator_project, reconfigurator_items) = all_items
         .iter()
         .find(|(k, _)| k.starts_with("Oxide: Reconfigurator"))
-        .ok_or_else(|| anyhow!("failed to identify Reconfigurator project"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "failed to identify Reconfigurator project (found: {:?})",
+                all_items.iter().map(|(p, _)| p).collect::<Vec<_>>()
+            )
+        })?;
     let other_project_items = all_items
         .iter()
         .filter_map(|(k, v)| {
