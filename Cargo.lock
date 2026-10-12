@@ -1020,7 +1020,7 @@ dependencies = [
  "jsonwebtoken",
  "percent-encoding",
  "pin-project",
- "reqwest 0.13.5",
+ "reqwest",
  "rustls",
  "secrecy",
  "serde",
